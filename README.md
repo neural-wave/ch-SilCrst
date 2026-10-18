@@ -15,6 +15,11 @@ Solar panels can supply part of that use directly, reducing the energy drawn fro
 We look for this reduction and how it changes over time. No external weather, solar irradiance
 or customer location data is used, and no LLM runs in the inference pipeline.
 
+The submitted model combines **rules based on solar-production patterns** with a **Vision
+Transformer (ViT)** for estimating initial capacity. The rules decide whether PV is present,
+when production started and whether the system was expanded. The network estimates its size,
+with a separate rule retained for small systems that only become clearly visible after expansion.
+
 Report: [project report](../report/report.pdf).
 
 ## Team
@@ -31,7 +36,9 @@ The trained model is included in `models/`: **no training is needed to generate 
 Inference runs on CPU and requires no internet connection once the dependencies are installed.
 
 Use Python 3.11–3.13 (tested with 3.13.7). Install the versions specified in `requirements.txt`:
-the saved capacity model uses Python's pickle format and depends on compatible library versions.
+the CatBoost capacity models use Python's pickle format and depend on compatible library versions.
+The Transformer weights are stored separately in `models/vit_capacity.npz`. Its inference code
+uses NumPy and SciPy, so **PyTorch and a GPU are not required** to run the submission.
 
 Run these commands from the directory containing this README and `inference.py`
 (the activation command below is for macOS/Linux):
@@ -87,6 +94,13 @@ decimal places. The separator is a **semicolon**, following the text of the proj
 output, change `OUTPUT_SEP` in `pvdetect/output.py`.
 
 ## How the model works
+
+| Task | Component used in the submission |
+|---|---|
+| Detect PV and estimate its start date | Standby-load and midday-reduction rules, with seasonal and weather-pattern checks |
+| Estimate initial capacity | Vision Transformer, except for the small-system expansion case described below |
+| Detect expansions | Changes in the duration of the midday reduction, plus a rule for initially weak systems |
+| Estimate capacity after an expansion | Estimated growth applied to initial capacity; CatBoost for the initially weak-system case |
 
 ### 1. Put all readings on a consistent timeline
 
@@ -149,22 +163,41 @@ Capacity is harder to infer than presence. Once solar production covers the buil
 grid withdrawal reaches zero. A larger PV system may still produce more electricity, but that
 extra production is invisible in the withdrawal readings.
 
-We estimate capacity with five **CatBoost models**, which learn relationships between measured
-features and known capacities. Features include the nighttime load, the duration of the midday
-reduction and its size on sunny days.
+We estimate the initial capacity with a **Vision Transformer**, a neural network that compares
+patterns across the customer's whole withdrawal history. Each day is represented by a compact
+summary of its 96 readings and which readings are missing. Calendar information helps the
+network interpret seasonal and weekly changes, while a separate input preserves the building's
+absolute consumption level.
 
-There are too few labelled PV customers to train these models on real examples alone. Each
-model therefore uses the labelled customers together with its own set of 1,360 simulated PV
-customers. We create these examples by subtracting simulated solar production from real
-consumption series classified as confidently PV-free, stopping at zero grid withdrawal.
+The network estimates how likely each day is to be before or after the start of production,
+then compares the two periods to infer capacity. This internal estimate is used only to calculate
+capacity; the installation date written to the output still comes from the rules in step 4.
+Instead of producing just one possible size, the network predicts a distribution of plausible
+capacities. We select the value that maximizes the expected official capacity score under that
+distribution, within the capacity limits stored in `models/baseline.json`.
+
+There are too few labelled PV customers to train a network on real examples. The network was
+therefore trained in two stages, without using any of the 40 labelled development customers:
+
+1. first to fill in hidden days of the unlabelled series, which teaches it what normal
+   consumption looks like;
+2. then to predict the known capacities of simulated PV systems added to 369 unlabelled customers
+   classified as PV-free. Simulated solar production is subtracted from their actual readings,
+   stopping at zero grid withdrawal.
 
 The simulation uses a clear-day production curve and daily sunshine factors derived from the
 consumption data. The curve is estimated from small PV systems whose production is fully used
 on site, where a reduction in grid withdrawal can reveal the amount produced.
 
-The five models learn capacity on a logarithmic scale. Their predictions are combined using a
-geometric mean: we average the logarithms of their estimates and convert the result back to kWp.
-This reduces sensitivity to the particular simulated training set.
+The exported weights are in `models/vit_capacity.npz`, and the inference implementation is in
+`pvdetect/vit_capacity.py`. The network updates the initial capacity of customers already
+identified as having PV. It does not change their PV verdict or reported installation date.
+
+Five **CatBoost models** remain part of the pipeline. Each was trained on labelled customers and
+its own set of 1,360 simulated systems; their predictions are combined using a geometric mean.
+They supply the capacity after expansion for the initially weak systems described in step 6.
+If `vit_capacity.npz` is missing, inference prints a warning and keeps the baseline capacity
+estimates. Keep all supplied model files in place to run the submitted configuration.
 
 ### 6. Detect later expansions (bonus task)
 
@@ -175,12 +208,24 @@ A separate rule handles small systems that only become obvious after an expansio
 evidence of solar production before the initially detected start, that later event may be an
 expansion of an existing system. This helps avoid reporting the expansion as the first installation.
 
+For these initially weak systems, the initial capacity is estimated from the earlier sunny-day
+reduction, and CatBoost estimates the total capacity after expansion. The Transformer does not
+overwrite these estimates: on 147 simulated cases of this kind, it underestimated the expanded
+system's size (capacity score 0.30, compared with 0.68 for CatBoost).
+
+For ordinary expansions, the detector estimates a capacity increase relative to the preceding
+system size. The new initial capacity from the Transformer therefore also affects these later
+capacity estimates, even though the expansion-detection rules are unchanged. The submitted
+configuration reports up to two strongest qualifying candidates across the input file, in
+addition to events found by the initially weak-system rule.
+
 ## Results and limitations
 
 We evaluated the model on the **40 labelled development customers**, of whom 22 have PV, using
 **leave-one-customer-out validation**. Each customer is predicted in turn, with the main detection
-threshold and capacity model fitted using the other 39 customers' labels. The predictions are
-then scored together using the official metric:
+threshold and baseline capacity models fitted using the other 39 customers' labels. The same
+pretrained Transformer is used in every fold: it was not trained on these customers' readings
+or labels. The predictions are then scored together using the official metric:
 
 ```text
 Main score = F1 × (70 + 15 × D + 15 × P)
@@ -193,18 +238,25 @@ has a maximum of 100, before the separate extension bonus.
 
 | Main score | F1: detection | D: installation date | P: capacity | Median relative capacity error |
 |---|---|---|---|---|
-| **88.26** | 1.000 | 0.732 | 0.486 | 24% |
+| **89.39** | 1.000 | 0.732 | 0.561 | 19% |
 
 All 22 PV systems are detected, with no false alarms among the 18 customers without PV. The
 median absolute date error is 1 day, and 16 of the 22 dates are within a week of the labelled date.
-The median capacity error of 24% means that half the estimates are within 24% of the true capacity.
+The median capacity error of 19% means that half the estimates are within 19% of the true capacity;
+16 of the 22 are within 25%. With the CatBoost capacity models instead of the network, the same
+detections and dates score 88.26 (P 0.486, median capacity error 24%).
+
+The gain in capacity score is promising but uncertain: resampling the 22 PV customers gives an
+interval of −0.06 to +0.22 for the change in P relative to CatBoost. This interval includes zero,
+so the observed improvement does not establish that the Transformer will perform better on
+every new set of customers.
 
 We also checked how much scores vary with the customers being evaluated:
 
 | Check | Result | Interpretation |
 |---|---|---|
-| Bootstrap resampling of the 40 customers | 95% interval: 81.1–93.8 | Variation when sampling customers with replacement from the development predictions |
-| Repeated subsets of 20 development customers | 5th–95th percentile: 84.6–92.2 | Variation across smaller evaluation sets drawn from the same 40 customers |
+| Bootstrap resampling of the 40 customers | 95% interval: 83.0–93.9 | Variation when sampling customers with replacement from the development predictions |
+| Repeated subsets of 20 development customers | 5th–95th percentile: 86.2–92.6 | Variation across smaller evaluation sets drawn from the same 40 customers |
 | Extension evaluation on simulated test-like sets | 2.7–3.0 bonus points | Estimated bonus on synthetic scenarios, not a measured hidden-test result |
 
 **These are development results, not hidden-test results.** The two score intervals are
@@ -213,10 +265,12 @@ capture all the uncertainty about performance on new customers, and we expect a 
 score on the hidden test. `scripts/report.py` reproduces the first two checks from the saved
 leave-one-out predictions.
 
-## Reproduce training and evaluation
+## Rebuild the baseline and evaluate the submitted model
 
-This section is only needed to rebuild or evaluate the model. The organizers' data is not
-included in the repository.
+The commands below rebuild the detection settings, production and weather models, and CatBoost
+capacity models. Evaluation then also applies the **included Transformer weights** to score the
+submitted configuration. These commands do not retrain the Transformer; its separate training
+and export workflow is described afterwards. The organizers' data is not included in the repository.
 
 Place the following files in a local data directory. If your copies use the later
 `*_development.csv` names, rename them or create links using the names below:
@@ -230,8 +284,8 @@ energy_consumption_unlabelled_dev.csv
 
 With the virtual environment activated, run the commands below from the same directory as
 `inference.py`. Set `DATA_DIR` to your data directory. Intermediate files are written to `cache/`
-and `outputs/`, both excluded from version control. The weather-building and final training
-steps update the files in `models/`.
+and `outputs/`, both excluded from version control. The weather-building and baseline training
+steps update their files in `models/`; `vit_capacity.npz` is kept as supplied.
 
 ```bash
 DATA_DIR="/absolute/path/to/data"
@@ -247,21 +301,44 @@ python scripts/pseudo_label.py "$DATA_DIR"
 python scripts/build_production.py "$DATA_DIR"
 python scripts/build_weather.py "$DATA_DIR"
 
-# Generate five simulated training sets, one for each capacity model.
+# Generate five simulated training sets, one for each CatBoost capacity model.
 for k in 0 1 2 3 4; do
     python scripts/augment.py "$DATA_DIR" --seed "$k" --out "augmented_w${k}.csv"
 done
 
-# Evaluate by leaving out one labelled customer at a time, then summarize the results.
+# Refit the baseline on all development customers (does not train the Transformer).
+python scripts/train.py "$DATA_DIR" --augmented cache/augmented_w{0,1,2,3,4}.csv
+
+# Evaluate the baseline and the submitted variant with Transformer capacities.
 python scripts/evaluate.py "$DATA_DIR" --augmented cache/augmented_w{0,1,2,3,4}.csv
 python scripts/report.py outputs/loo_details.csv
 
-# Fit the submission model using all development customers.
-python scripts/train.py "$DATA_DIR" --augmented cache/augmented_w{0,1,2,3,4}.csv
-
 # Run unit and pipeline tests; these use synthetic data only.
-python -m pytest
+python -m pytest tests
 ```
+
+With `models/vit_capacity.npz` present, `scripts/evaluate.py` prints both the baseline and
+Transformer results and saves the submitted variant's predictions to `outputs/loo_details.csv`.
+`scripts/report.py` uses those saved predictions for the score summary and resampling checks.
+The score printed by `scripts/train.py` is only an in-sample baseline check, not the final
+validation score.
+
+### Transformer training and export
+
+The Transformer was trained with the team's separate PyTorch implementation (`pvdetect.vit`,
+documented in that repository's `docs/vit.md`; a GPU is recommended for training). Those training
+modules are not included in this submission directory. This directory contains the exported
+weights, NumPy inference code and a conversion script.
+
+If you have the team's `base_0.pt` checkpoint from the synthetic-training stage and PyTorch
+installed, you can regenerate the inference weights with:
+
+```bash
+python scripts/export_vit_capacity.py path/to/base_0.pt --out models/vit_capacity.npz
+```
+
+This converts the checkpoint into NumPy arrays; it does not train or fine-tune the network.
+Neither the original checkpoint nor PyTorch is needed to use the supplied `.npz` file.
 
 Additional calibration and analysis tools are in `scripts/calibrate_*.py`, `scripts/eval_*.py`,
 `scripts/feature_stats.py` and `scripts/robustness.py`. To try the development workflow without
@@ -273,9 +350,14 @@ AIL data, `scripts/make_synthetic.py` generates a fake dataset with the same sch
 |---|---|
 | `inference.py` | Entry point that reads the test data and writes the submission files |
 | `pvdetect/` | Input parsing, feature extraction, PV detection, dates, capacity, expansions and output formatting |
-| `models/` | Saved detection settings (`baseline.json`), capacity models and aggregate sunniness indices |
+| `pvdetect/vit_capacity.py` | Transformer inference and replacement of eligible initial capacity estimates |
+| `models/baseline.json` | Detection settings, capacity limits, production-curve parameters and expansion settings |
+| `models/vit_capacity.npz` | Exported Transformer weights for initial capacity |
+| `models/baseline_capacity.pkl` | Five CatBoost capacity models retained for the small-system expansion rule and fallback |
+| `models/weather_index.npz` | Aggregate daily sunniness indices |
 | `devtools/` | Training utilities for simulated PV production and weather-pattern estimation |
 | `scripts/` | Data preparation, training, evaluation, calibration and analysis commands |
+| `scripts/export_vit_capacity.py` | Conversion of the team's PyTorch checkpoint into inference weights |
 | `tests/` | Unit and pipeline tests using synthetic data |
 
 ## Data rules and AI usage
@@ -285,11 +367,12 @@ AIL data, `scripts/make_synthetic.py` generates a fake dataset with the same sch
 - No AIL source data is included in this repository. The files in `models/` contain trained
   parameters and aggregate signals.
 - **No LLM is part of the inference pipeline.**
-- We used Claude Code to write code, brainstorm the approach and draft the report.
+- We used agentic coding tools to write code, brainstorm the approach and draft the report.
 
 ## Credits
 
-Open-source libraries: NumPy, pandas, SciPy, scikit-learn, CatBoost and pytest.
+Open-source libraries: NumPy, pandas, SciPy, scikit-learn, CatBoost and pytest; PyTorch to train the
+capacity network (not needed at inference).
 
 During development, we also checked the model on the public HEAPO dataset (heat-pump households
 in Zurich, CC BY 4.0) to assess how it behaved on a different type of customer. HEAPO is not used

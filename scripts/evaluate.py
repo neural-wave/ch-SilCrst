@@ -2,6 +2,9 @@
 
 Usage: python scripts/evaluate.py DATA_DIR [--cache cache] [--details outputs/loo_details.csv]
 
+With models/vit_capacity.npz present it also scores the submitted variant: the same verdicts and
+dates with the ViT's initial kWp (its weights never saw a development customer).
+
 The per-customer details file holds AIL data: it stays in outputs/ (git-ignored).
 """
 import argparse
@@ -19,6 +22,7 @@ from pvdetect.io import load_consumption, read_extension_labels, read_labels, re
 from pvdetect.metrics import score_extensions, score_main  # noqa: E402
 from pvdetect.model import SCORE_FEATURES, BaselineModel  # noqa: E402
 from pvdetect.validate import validation_report  # noqa: E402
+from pvdetect.vit_capacity import VitCapacity, with_vit_capacity  # noqa: E402
 
 
 def leave_one_out(feats: pd.DataFrame, labels: pd.DataFrame, augmented: pd.DataFrame | None = None,
@@ -84,6 +88,13 @@ def main() -> None:
     print(f"  capacity (TP): median APE {s['ape_median']:.0%} | <=25%: {s['ape_within_25']}/{s['tp']} "
           f"| <50%: {s['ape_within_50']}/{s['tp']}")
     saved = BaselineModel.load("models/baseline.json")
+    vit_path = Path("models/vit_capacity.npz")
+    if vit_path.exists():  # as inference.py: the ViT's initial kWp (pvdetect/vit_capacity.py)
+        preds = with_vit_capacity(preds, data, VitCapacity.load(vit_path), saved.cap_clip_kwp)
+        s = score_main(preds, labels)
+        print(f"  with the ViT's initial kWp (submitted): {fmt(s)}")
+        print(f"  capacity (TP): median APE {s['ape_median']:.0%} | <=25%: {s['ape_within_25']}/{s['tp']} "
+              f"| <50%: {s['ape_within_50']}/{s['tp']}")
     ext_pred = saved.predict_extensions(data, preds)
     ext = score_extensions(ext_pred, ext_labels)
     print(f"  extension bonus: {ext['bonus']:.2f}/10 (TP {ext['tp']} FP {ext['fp']} FN {ext['fn']}; "
