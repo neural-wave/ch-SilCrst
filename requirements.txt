@@ -1,0 +1,8 @@
+# Tested with Python 3.13.7; needs Python >= 3.11 (scikit-learn 1.8.0, numpy 2.3).
+# Exact pins: the capacity model is a pickle (CatBoost inside a scikit-learn-era wrapper) and
+# pickles written with numpy 2 do not load under numpy 1.
+numpy==2.3.3
+pandas==2.3.3
+scikit-learn==1.8.0
+catboost==1.2.10
+scipy>=1.11,<2  # only scipy.special.ndtri (pvdetect/weather.py)

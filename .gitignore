@@ -1,0 +1,22 @@
+# Challenge data: AIL data must never be committed or shared (repository is open-sourced)
+AIL_data_for_neural_wave*/
+data/
+*.csv
+
+# Derived from AIL data (caches, per-customer outputs, labels): never committed
+cache/
+outputs/
+
+# Synthetic test data (regenerate with scripts/make_synthetic.py)
+synthetic_data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,62 @@
+{
+  "score_feature": "rate60_max",
+  "threshold": 0.125,
+  "use_ratio_rule": true,
+  "ratio_threshold": 10.0,
+  "shape_min_corr": 0.8,
+  "shape_amp_range": [
+    0.5,
+    2.0
+  ],
+  "reconcile_gap_days": 30,
+  "max_dark_zero_share": 0.4,
+  "weather_file": "weather_index.npz",
+  "weather_min_r": 0.1,
+  "weather_summer_exempt": 0.5,
+  "weather_rescue_r": 0.15,
+  "weather_exempt_season_gap": 0.5,
+  "weather_summer_min_r": 0.05,
+  "schedule_dst_h": 1.0,
+  "schedule_centroid_h": [
+    8.5,
+    15.0
+  ],
+  "schedule_keep_weather_r": 0.4,
+  "weak_min_r": 0.3,
+  "weak_min_shape": 0.8,
+  "weak_kwp_per_drop": 27.0,
+  "date_offset_days": 0,
+  "cap_coef": [
+    1.2977047483672475,
+    0.6831944547111145,
+    0.23509362762145963
+  ],
+  "cap_default_kwp": 169.5,
+  "cap_clip_kwp": [
+    13.5,
+    1918.0
+  ],
+  "capacity_file": "baseline_capacity.pkl",
+  "bell": [
+    11.6875,
+    1.25,
+    12.583782056837565,
+    2.321220996369793,
+    -0.8270742503269464,
+    0.3614635156983498
+  ],
+  "extension": {
+    "top_k": 2,
+    "ratio_min": 1.2,
+    "ratio_max": 3.0,
+    "delta_min_h": 0.5,
+    "gain_min": 0.3
+  },
+  "info": {
+    "n_train": 40,
+    "n_pv": 22,
+    "n_capacity_fit": 21,
+    "n_synthetic": 6800,
+    "n_synthetic_sets": 5
+  }
+}
